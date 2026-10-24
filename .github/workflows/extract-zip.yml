@@ -1,0 +1,87 @@
+name: Auto extract ZIP
+
+# Repo me koi .zip file upload/push karte hi ye apne aap chalega:
+#  1. zip ko extract karke files repo ke root me daal dega
+#     (agar zip ke andar sirf ek top folder hai to wo folder hata diya jata hai)
+#  2. zip file ko delete kar dega
+#  3. changes ko commit + push kar dega
+#
+# Normal zip  (naam: kuch.zip)          -> files add/overwrite hoti hain, purani extra files rehti hain
+# Replace zip (naam: kuch-replace.zip)  -> pehle saari purani files hat jati hain, phir naya code aata hai
+#
+# .github folder aur .git zip se kabhi copy nahi hote (safety ke liye).
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '**.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Find and extract zip files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t ZIPS < <(find . -type f -iname '*.zip' -not -path './.git/*' | sort)
+          if [ ${#ZIPS[@]} -eq 0 ]; then
+            echo "Koi zip file nahi mili, kuch karna nahi hai."
+            exit 0
+          fi
+
+          for ZIP in "${ZIPS[@]}"; do
+            echo "=== Processing: $ZIP"
+            TMP="$(mktemp -d)"
+            unzip -q -o "$ZIP" -d "$TMP"
+
+            # Mac/Windows ka kachra hatao
+            rm -rf "$TMP/__MACOSX"
+            find "$TMP" -name '.DS_Store' -delete
+            find "$TMP" -name 'Thumbs.db' -delete
+
+            # Agar zip me sirf ek top-level folder hai to uske andar ka content lo
+            SRC="$TMP"
+            COUNT="$(find "$TMP" -mindepth 1 -maxdepth 1 | wc -l)"
+            if [ "$COUNT" -eq 1 ] && [ -d "$(find "$TMP" -mindepth 1 -maxdepth 1)" ]; then
+              SRC="$(find "$TMP" -mindepth 1 -maxdepth 1)"
+            fi
+
+            # Safety: zip se .git aur .github kabhi nahi lenge
+            rm -rf "$SRC/.git" "$SRC/.github"
+
+            # Replace mode: naam "-replace.zip" par khatam ho
+            case "$(basename "$ZIP" | tr 'A-Z' 'a-z')" in
+              *-replace.zip)
+                echo "Replace mode: purani files hata raha hu"
+                find . -mindepth 1 -maxdepth 1 -not -name '.git' -not -name '.github' -not -path "./$(basename "$ZIP")" -exec rm -rf {} +
+                ;;
+            esac
+
+            cp -a "$SRC"/. ./
+            rm -f "$ZIP"
+            rm -rf "$TMP"
+            echo "Done: $ZIP"
+          done
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Koi change nahi, commit skip."
+            exit 0
+          fi
+          git commit -m "Auto-extract zip [skip ci]"
+          git push
