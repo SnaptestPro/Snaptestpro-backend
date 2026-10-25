@@ -42,9 +42,14 @@ async function importDocs(db, collection, docs, chunk = 500) {
 }
 
 async function main() {
-  const admin = require('firebase-admin');
-  admin.initializeApp({ credential: admin.credential.cert(require(process.cwd() + '/serviceAccount.json')) });
-  const fs = admin.firestore();
+  // firebase-admin ke naye versions (12+) me admin.credential nahi hai, isliye modular import
+  const { initializeApp, cert } = require('firebase-admin/app');
+  const { getFirestore } = require('firebase-admin/firestore');
+  const keyPath = process.cwd() + '/serviceAccount.json';
+  if (!require('fs').existsSync(keyPath)) { console.error('serviceAccount.json nahi mili: ' + keyPath + '\nFirebase Console > Project settings > Service accounts > Generate new private key, aur file ka naam serviceAccount.json rakho.'); process.exit(1); }
+  if (!process.env.DATABASE_URL) { console.error('DATABASE_URL set nahi hai (PowerShell: $env:DATABASE_URL="postgresql://...")'); process.exit(1); }
+  initializeApp({ credential: cert(require(keyPath)) });
+  const fs = getFirestore();
   const db = new Pool({ connectionString: process.env.DATABASE_URL });
   const { initDb } = require('../server'); await initDb();
   let names = process.argv.slice(2);

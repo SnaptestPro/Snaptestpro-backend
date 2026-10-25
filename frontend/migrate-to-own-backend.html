@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Data apne backend par copy karo</title>
+<style>
+  :root { --bg:#f3f6fb; --card:#fff; --ink:#14213d; --mut:#5b6b88; --ok:#0a8f4e; --bad:#c62828; --warn:#b26a00; --pri:#2a4bd7; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width: 760px; margin: 0 auto; padding: 18px 14px 60px; }
+  h1 { font-size: 21px; margin: 6px 0 4px; }
+  .sub { color: var(--mut); font-size: 14px; margin-bottom: 14px; }
+  .card { background: var(--card); border-radius: 14px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 4px rgba(20,33,61,.08); }
+  .card h2 { font-size: 16px; margin: 0 0 8px; }
+  .step { display:inline-block; background:var(--pri); color:#fff; border-radius: 50%; width: 24px; height: 24px; text-align:center; line-height:24px; font-size: 13px; margin-right: 6px; }
+  label { display:block; font-size: 13px; color: var(--mut); margin: 8px 0 3px; }
+  input[type=text], input[type=email], input[type=password], input[type=url] { width:100%; padding: 10px; border: 1px solid #c8d1e0; border-radius: 9px; font-size: 15px; }
+  button { background: var(--pri); color:#fff; border:0; border-radius: 10px; padding: 11px 16px; font-size: 15px; cursor:pointer; margin: 8px 8px 0 0; }
+  button.sec { background:#e8edf8; color: var(--pri); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .pill { display:inline-block; padding: 3px 10px; border-radius: 99px; font-size: 13px; background:#eef2fa; margin: 2px 4px 2px 0; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .bar { height: 10px; background:#e6ebf5; border-radius: 99px; overflow:hidden; margin: 6px 0; }
+  .bar > i { display:block; height:100%; width:0; background: var(--ok); transition: width .2s; }
+  .coll { padding: 8px 0; border-bottom: 1px solid #eef1f7; font-size: 14px; }
+  .coll:last-child { border-bottom: 0; }
+  #log { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; background:#0f172a; color:#d6e2ff; border-radius: 10px; padding: 10px; max-height: 260px; overflow:auto; white-space: pre-wrap; }
+  small { color: var(--mut); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Data apne backend par copy karo</h1>
+  <div class="sub">Firebase ka data <b>copy</b> hota hai, Firebase me kuch nahi badalta. Is page ko sirf <b>Owner</b> account se chalao.</div>
+
+  <div class="card" id="c1">
+    <h2><span class="step">1</span>Owner se login</h2>
+    <div id="who" class="sub">Login check ho raha hai...</div>
+    <div id="loginBox">
+      <label>Owner ki email</label><input type="email" id="em" autocomplete="username" placeholder="owner@gmail.com">
+      <label>Password</label><input type="password" id="pw" autocomplete="current-password">
+      <div class="row"><button id="btnLogin">Login</button><button class="sec" id="btnGoogle">Google se login</button></div>
+    </div>
+    <button class="sec" id="btnLogout" style="display:none">Logout</button>
+  </div>
+
+  <div class="card" id="c2">
+    <h2><span class="step">2</span>Backend se connection</h2>
+    <label>Backend ka URL</label><input type="url" id="url">
+    <button id="btnCheck">Check karo</button>
+    <div id="checkOut" class="sub" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card" id="c3">
+    <h2><span class="step">3</span>Copy karo</h2>
+    <div class="sub">Ye Firebase se <b>reads</b> lagata hai (ek baar). Roz ki free limit khatam ho jaye to ruk jayega; agle din phir dabao, wahin se aage badhega.</div>
+    <div id="colls"></div>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="resume" checked> Pichhli baar jahan ruka tha wahin se aage badho</label>
+    <button id="btnCopy" disabled>Copy shuru karo</button>
+    <div class="bar"><i id="bar"></i></div>
+    <div id="status" class="sub"></div>
+  </div>
+
+  <div class="card" id="c4" style="display:none">
+    <h2><span class="step">4</span>Ho gaya</h2>
+    <div id="done"></div>
+  </div>
+
+  <div class="card"><h2>Log</h2><div id="log">Yaha progress dikhega...</div></div>
+</main>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+<script src="app-config.js"></script>
+<script src="firebase-config.js"></script>
+<script src="migrate-to-own-backend.js"></script>
+</body>
+</html>

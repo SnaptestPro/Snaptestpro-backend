@@ -87,6 +87,20 @@ const who = async t => (await call('GET', '/api/auth/whoami', null, t)).j;
   ok((await call('GET', '/api/collections/tests/documents', null, T.owner)).s === 403, "collection not in rules.json -> blocked even for owner (default none)");
   ok((await call('POST', '/api/collections/tests/documents', { data: {} }, T.A)).s === 403, 'unknown collection write blocked for admin');
 
+
+  console.log('COUNT + UNUSUAL DOC IDS');
+  const odd = ['प्रश्न 1', 'a b#c?d', 'seed:ab+cd@e.f', 'x'.repeat(300)];
+  for (const id of odd) {
+    const w1 = await call('POST', '/api/collections/seedExclusions/documents', { docId: id, data: { v: 1 } }, T.owner);
+    const g1 = await call('GET', '/api/collections/seedExclusions/documents/' + encodeURIComponent(id), null, T.owner);
+    ok(w1.s === 200 && g1.s === 200 && g1.j.doc.id === id, 'doc id round-trips: ' + id.slice(0, 12));
+  }
+  ok((await call('POST', '/api/collections/seedExclusions/documents', { docId: 'a/b', data: {} }, T.owner)).s === 400, "doc id with '/' rejected");
+  ok((await call('POST', '/api/collections/seedExclusions/documents', { docId: '..', data: {} }, T.owner)).s === 400, "doc id '..' rejected");
+  ok((await call('GET', '/api/collections/seedExclusions/count', null, T.A)).j.count === 4, 'count endpoint (admin)');
+  ok((await call('GET', '/api/collections/seedExclusions/count', null, T.stu)).s === 403, 'count respects read rule (student blocked)');
+  ok((await call('GET', '/api/collections/questionBank/count', null, T.stu)).j.count >= 1, 'count for readable collection (student)');
+
   console.log('serverTimestamp sentinel');
   const ts = await call('POST', '/api/collections/appSettings/documents', { docId: 's1', data: { updatedAt: { __sv: 'serverTimestamp' }, nested: { at: { __sv: 'serverTimestamp' } } } }, T.A);
   ok(ts.s === 200 && typeof ts.j.doc.data.updatedAt.__ts === 'number' && typeof ts.j.doc.data.nested.at.__ts === 'number', 'sentinel -> {__ts: ms} (also nested)');

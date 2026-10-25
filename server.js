@@ -114,7 +114,8 @@ class HttpError extends Error {
 const wrap = fn => (req, res, next) => fn(req, res, next).catch(next);
 
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const DOCID_RE = /^[A-Za-z0-9_\-.:@+]{1,200}$/;
+// Firestore jaisa: koi bhi character (hindi, space, #...) chalega, bas '/' aur control characters nahi, '.' / '..' nahi, max 1500 bytes
+const DOCID_RE = /^[^/\u0000-\u001f]{1,1500}$/;
 const FIELD_RE = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/;
 
 function checkCollection(name) {
@@ -122,7 +123,7 @@ function checkCollection(name) {
   return name;
 }
 function checkDocId(id) {
-  if (!DOCID_RE.test(id)) throw new HttpError(400, 'Invalid document id');
+  if (typeof id !== 'string' || id === '.' || id === '..' || !DOCID_RE.test(id) || Buffer.byteLength(id) > 1500) throw new HttpError(400, 'Invalid document id');
   return id;
 }
 function rule(collection, kind) {
@@ -428,6 +429,17 @@ app.get('/api/collections/:collection/documents', wrap(async (req, res) => {
 
   const r = await db.query(sql, params);
   res.json({ success: true, docs: r.rows.map(fmt), count: r.rows.length, serverTime: new Date().toISOString() });
+}));
+
+// Kitne documents hain (migration ke baad Firebase se milan karne ke liye)
+app.get('/api/collections/:collection/count', wrap(async (req, res) => {
+  const collection = checkCollection(req.params.collection);
+  const perm = canRead(collection, req.user);
+  if (!perm.ok) throw new HttpError(req.user ? 403 : 401, req.user ? 'Read not allowed' : 'Login required');
+  const params = [collection]; let sql = 'SELECT COUNT(*)::int AS c FROM documents WHERE collection_name = $1';
+  if (perm.ownerOnly) { params.push(req.user.uid); sql += ' AND owner_uid = $2'; }
+  const r = await db.query(sql, params);
+  res.json({ success: true, count: r.rows[0].c });
 }));
 
 app.get('/api/collections/:collection/documents/:docId', wrap(async (req, res) => {
