@@ -302,7 +302,7 @@ async function opDelete(client, user, collection, docId) {
   const lvl = rule(collection, 'write');
   const privileged = isAdmin(user) || lvl === 'auth' || lvl === 'public';
   const ex = (await client.query('SELECT data, owner_uid FROM documents WHERE collection_name=$1 AND doc_id=$2 FOR UPDATE', [collection, docId])).rows[0];
-  if (!ex) throw new HttpError(404, 'Document not found');
+  if (!ex) return null; // Firebase jaisa: jo document hai hi nahi, uska delete chupchap ho jata hai (404 nahi)
   if (!privileged && ex.owner_uid !== uidOf(user)) throw new HttpError(403, 'Ye document kisi aur ka hai');
   if (!guardOk(collection, user, 'delete', ex.data, null)) throw new HttpError(403, 'createdBy rule: ye question kisi aur admin ka hai');
   const r = await client.query('DELETE FROM documents WHERE collection_name = $1 AND doc_id = $2 RETURNING *', [collection, docId]);
@@ -472,7 +472,7 @@ app.patch('/api/collections/:collection/documents/:docId', wrap(async (req, res)
 app.delete('/api/collections/:collection/documents/:docId', wrap(async (req, res) => {
   const { collection, docId } = req.params;
   const row = await opDelete(db, req.user, collection, docId);
-  broadcast(collection, row, 'delete');
+  if (row) broadcast(collection, row, 'delete');
   res.json({ success: true });
 }));
 
@@ -487,7 +487,7 @@ app.post('/api/batch', wrap(async (req, res) => {
     for (const o of ops) {
       if (o.type === 'set') events.push([o.collection, await opSet(client, req.user, o.collection, o.docId || crypto.randomUUID(), o.data, !!o.merge), 'set']);
       else if (o.type === 'update') events.push([o.collection, await opUpdate(client, req.user, o.collection, o.docId, o.data), 'update']);
-      else if (o.type === 'delete') events.push([o.collection, await opDelete(client, req.user, o.collection, o.docId), 'delete']);
+      else if (o.type === 'delete') { const dr = await opDelete(client, req.user, o.collection, o.docId); if (dr) events.push([o.collection, dr, 'delete']); }
       else throw new HttpError(400, 'Unknown op type');
     }
     await client.query('COMMIT');
