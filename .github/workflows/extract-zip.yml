@@ -9,13 +9,14 @@ name: Auto extract ZIP
 # Normal zip  (naam: kuch.zip)          -> files add/overwrite hoti hain, purani extra files rehti hain
 # Replace zip (naam: kuch-replace.zip)  -> pehle saari purani files hat jati hain, phir naya code aata hai
 #
+# SIRF repo ke root folder ki zip file par kaam karta hai (andar ke folders jaise updates/ ki zips ko nahi chhuta).
 # .github folder aur .git zip se kabhi copy nahi hote (safety ke liye).
 
 on:
   push:
     branches: [main, master]
     paths:
-      - '**.zip'
+      - '*.zip'
   workflow_dispatch:
 
 permissions:
@@ -32,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t ZIPS < <(find . -type f -iname '*.zip' -not -path './.git/*' | sort)
+          mapfile -t ZIPS < <(find . -maxdepth 1 -type f -iname '*.zip' | sort)
           if [ ${#ZIPS[@]} -eq 0 ]; then
             echo "Koi zip file nahi mili, kuch karna nahi hai."
             exit 0
@@ -83,5 +84,5 @@ jobs:
             echo "Koi change nahi, commit skip."
             exit 0
           fi
-          git commit -m "Auto-extract zip [skip ci]"
+          git commit -m "Auto-extract zip"
           git push
