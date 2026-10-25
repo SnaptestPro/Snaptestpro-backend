@@ -19,3 +19,9 @@ services:
         sync: false
       - key: ADMIN_EMAILS
         sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: OWNER_EMAILS
+        sync: false
+      - key: EXTRA_ADMIN_EMAILS
+        sync: false

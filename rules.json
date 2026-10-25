@@ -1,10 +1,13 @@
 {
-  "_help": "Har collection ke liye read/write rule. read: public | auth | owner | admin | none.  write: public | auth | owner | admin | none.  public = bina login ke, auth = koi bhi logged-in user, owner = sirf jisne document banaya (aur admin), admin = sirf admin.  Jo collection yaha nahi hai uspe 'default' lagta hai.",
-  "default": { "read": "owner", "write": "owner" },
+  "_help": "Har collection ke liye read/write rule. Levels: public (bina login), auth (koi bhi login, Firebase anonymous bhi), owner (sirf banane wala + admin), admin (sirf admin), none (sabke liye band, admin ke liye bhi). Jo collection yaha nahi hai uspe 'default' lagta hai. createdByGuard = firestore.rules ke questionBank jaisa 'createdBy' niyam.",
+  "default": { "read": "none", "write": "none" },
   "collections": {
-    "questions": { "read": "auth",  "write": "admin" },
-    "tests":     { "read": "auth",  "write": "admin" },
-    "results":   { "read": "owner", "write": "owner" },
-    "records":   { "read": "owner", "write": "owner" }
+    "questionBank":     { "read": "auth",  "write": "admin", "createdByGuard": true },
+    "deletedQuestions": { "read": "admin", "write": "admin" },
+    "draftQuestions":   { "read": "admin", "write": "admin" },
+    "pdfDrafts":        { "read": "admin", "write": "admin" },
+    "seedExclusions":   { "read": "admin", "write": "admin" },
+    "appSettings":      { "read": "admin", "write": "admin" },
+    "app_settings":     { "read": "admin", "write": "admin" }
   }
 }

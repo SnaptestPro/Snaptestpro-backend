@@ -1,7 +1,7 @@
 // Run:  DATABASE_URL=postgresql://... npm test
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-test-secret-test-secret';
 process.env.ADMIN_EMAILS = 'admin@test.com';
-process.env.NODE_ENV = 'test';
+process.env.NODE_ENV = 'test'; process.env.RULES_FILE = require('path').join(__dirname, 'rules.test.json');
 const { server, db, initDb, io } = require('../server');
 const { io: ioc } = require('socket.io-client');
 let base, passed = 0, failed = 0;

@@ -1,5 +1,5 @@
 // Run:  DATABASE_URL=postgresql://... node test/sdk-test.js
-process.env.JWT_SECRET = 'test-secret-test-secret-test-secret'; process.env.ADMIN_EMAILS = 'admin@test.com'; process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET = 'test-secret-test-secret-test-secret'; process.env.ADMIN_EMAILS = 'admin@test.com'; process.env.NODE_ENV = 'test'; process.env.RULES_FILE = require('path').join(__dirname, 'rules.test.json');
 const store = {}; global.localStorage = { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; }, get length() { return Object.keys(store).length; } };
 Object.defineProperty(global.localStorage, 'keys', { value: () => Object.keys(store) });
 // SDK uses Object.keys(localStorage) -> make store enumerable on the shim

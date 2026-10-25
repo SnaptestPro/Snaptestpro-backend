@@ -1,6 +1,10 @@
 /**
- * SnapTestPro Backend v2 — free, self-hosted Firebase (Firestore + Auth + Storage) alternative
+ * SnapTestPro Backend v2.1 — free, self-hosted Firebase (Firestore + Auth + Storage) alternative
  * Node.js + Express + PostgreSQL (JSONB) + Socket.io
+ *
+ * v2.1 HYBRID MODE: Firebase login (ID token) bhi accept hota hai, taaki app ka Firebase Auth jaisa ka taisa
+ * rahe aur kuch collections (jaise questionBank) is backend par chalein. Admin/owner ka faisla Firebase ke
+ * `admins/{email}` document se hota hai (firestore.rules jaisa), is backend me alag admin list nahi banti.
  */
 require('dotenv').config();
 const express = require('express');
@@ -32,10 +36,19 @@ const ORIGINS = (process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).f
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(__dirname, 'uploads'));
 const MAX_UPLOAD = (parseInt(process.env.MAX_UPLOAD_MB, 10) || 10) * 1024 * 1024;
 const TOKEN_DAYS = 14;
+// ---- Hybrid mode (Firebase login bridge). FIREBASE_PROJECT_ID khali ho to Firebase tokens band rehte hain.
+const FIREBASE_PROJECT_ID = (process.env.FIREBASE_PROJECT_ID || '').trim();
+const lc = v => (v || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+const OWNER_EMAILS = lc(process.env.OWNER_EMAILS);               // firestore.rules ke isOwner() wali email(s)
+const EXTRA_ADMIN_EMAILS = lc(process.env.EXTRA_ADMIN_EMAILS);   // firestore.rules ki hardcoded admin email list
+const TRUST_SNAPROLE = process.env.TRUST_SNAPROLE === 'true';    // sirf tab true karo jab Firestore App Check enforce ho (neeche docs dekho)
+const ADMIN_CACHE_MS = 10 * 60 * 1000;
+let fetchFn = (...a) => fetch(...a); // tests me badal sakte hain
 
 let RULES = { default: { read: 'owner', write: 'owner' }, collections: {} };
-try { RULES = JSON.parse(fs.readFileSync(path.join(__dirname, 'rules.json'), 'utf8')); }
-catch (e) { console.warn('rules.json nahi mila, default rules (owner/owner) use ho rahe hain'); }
+const RULES_FILE = process.env.RULES_FILE ? path.resolve(process.env.RULES_FILE) : path.join(__dirname, 'rules.json');
+try { RULES = JSON.parse(fs.readFileSync(RULES_FILE, 'utf8')); }
+catch (e) { console.warn('rules file nahi mili (' + RULES_FILE + '), default rules (owner/owner) use ho rahe hain'); }
 
 const corsOrigin = (origin, cb) => {
   // Same-origin / curl / mobile webview (no Origin header) allowed
@@ -78,8 +91,10 @@ async function initDb() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (collection_name, doc_id)
     );
+    ALTER TABLE documents ADD COLUMN IF NOT EXISTS owner_uid TEXT;
+    UPDATE documents d SET owner_uid = u.uid FROM users u WHERE d.owner_uid IS NULL AND d.user_id = u.id;
     CREATE INDEX IF NOT EXISTS idx_documents_updated ON documents (collection_name, updated_at);
-    CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents (collection_name, user_id);
+    CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents (collection_name, owner_uid);
     CREATE TABLE IF NOT EXISTS file_storage (
       file_id TEXT PRIMARY KEY,
       filename TEXT,
@@ -114,29 +129,92 @@ function rule(collection, kind) {
   const r = (RULES.collections && RULES.collections[collection]) || RULES.default || {};
   return r[kind] || 'owner';
 }
-const isAdmin = u => !!u && u.role === 'admin';
 
 function signToken(user) {
-  return jwt.sign({ id: user.id, uid: user.uid, email: user.email, role: user.role }, SECRET, { expiresIn: `${TOKEN_DAYS}d` });
+  return jwt.sign({ id: user.id, uid: user.uid, email: user.email, role: user.role }, SECRET, { expiresIn: `${TOKEN_DAYS}d`, algorithm: 'HS256' });
 }
 function verifyToken(token) {
-  try { return jwt.verify(token, SECRET); } catch { return null; }
+  try { return jwt.verify(token, SECRET, { algorithms: ['HS256'] }); } catch { return null; }
 }
-function userFromReq(req) {
-  const h = req.headers.authorization || '';
-  const token = h.startsWith('Bearer ') ? h.slice(7) : null;
-  return token ? verifyToken(token) : null;
-}
-function requireAuth(req, res, next) {
-  const u = userFromReq(req);
-  if (!u) return res.status(401).json({ error: 'Login required' });
-  req.user = u; next();
-}
-function optionalAuth(req, res, next) { req.user = userFromReq(req); next(); }
 
-// Read allowed? returns {ok, ownerOnly}
+// ---- Firebase ID token verification (Google ke public certificates se, koi service-account nahi chahiye)
+let fbCerts = {}, fbCertsExp = 0;
+async function getFirebaseCerts() {
+  if (Date.now() < fbCertsExp && Object.keys(fbCerts).length) return fbCerts;
+  const r = await fetchFn('https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com');
+  if (!r.ok) throw new Error('Firebase certs fetch failed');
+  const m = /max-age=(\d+)/.exec((r.headers && r.headers.get && r.headers.get('cache-control')) || '');
+  fbCerts = await r.json();
+  fbCertsExp = Date.now() + (m ? parseInt(m[1], 10) * 1000 : 3600 * 1000);
+  return fbCerts;
+}
+async function verifyFirebase(token) {
+  if (!FIREBASE_PROJECT_ID) return null;
+  const dec = jwt.decode(token, { complete: true });
+  if (!dec || dec.header.alg !== 'RS256' || !dec.header.kid) return null;
+  let certs; try { certs = await getFirebaseCerts(); } catch (e) { console.warn('Firebase certs:', e.message); return null; }
+  const pem = certs[dec.header.kid]; if (!pem) return null;
+  try {
+    const p = jwt.verify(token, pem, { algorithms: ['RS256'], audience: FIREBASE_PROJECT_ID, issuer: 'https://securetoken.google.com/' + FIREBASE_PROJECT_ID });
+    if (!p.sub) return null;
+    return { uid: p.sub, email: p.email ? String(p.email).toLowerCase() : null, anonymous: !!(p.firebase && p.firebase.sign_in_provider === 'anonymous'),
+      snapRole: p.snapRole || '', firebase: true, idToken: token };
+  } catch { return null; }
+}
+// Firestore REST se (user ke apne token ke saath, to Firestore rules lagte hain) ek document padho
+async function fsGet(docPath, idToken) {
+  const url = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/${docPath}`;
+  const r = await fetchFn(url, { headers: { Authorization: 'Bearer ' + idToken } });
+  if (r.status === 404) return { status: 404, fields: {} };
+  if (!r.ok) return { status: r.status, fields: {} };
+  const j = await r.json(); return { status: 200, fields: j.fields || {} };
+}
+const adminCache = new Map(); // email -> { t, role, instituteId }
+// firestore.rules ke isOwner / isAdminEmailAllowed / adminInstituteActive ka copy
+async function firebaseRole(u) {
+  if (!u.email || u.anonymous) return { role: 'user' };
+  if (OWNER_EMAILS.includes(u.email) || u.snapRole === 'owner') return { role: 'owner' };
+  const c = adminCache.get(u.email);
+  if (c && Date.now() - c.t < c.ttl) return c;
+  let res = { role: 'user', instituteId: null }, ttl = ADMIN_CACHE_MS;
+  try {
+    const d = await fsGet('admins/' + encodeURIComponent(u.email), u.idToken);
+    const a = d.fields.active;
+    const active = d.status === 200 && a && 'booleanValue' in a ? a.booleanValue : null;
+    let ok = active === true || (EXTRA_ADMIN_EMAILS.includes(u.email) && active !== false);
+    if (!ok && TRUST_SNAPROLE && u.snapRole === 'admin') ok = true;
+    let inst = d.fields.instituteId && d.fields.instituteId.stringValue || null;
+    if (ok && inst) { // institute band (active:false) ho to admin nahi
+      const i = await fsGet('institutes/' + encodeURIComponent(inst), u.idToken);
+      if (i.status === 200 && i.fields.active && i.fields.active.booleanValue === false) ok = false;
+    }
+    res = { role: ok ? 'admin' : 'user', instituteId: inst };
+  } catch (e) { console.warn('admin check failed:', e.message); ttl = 30 * 1000; }
+  const entry = { t: Date.now(), ttl, ...res }; adminCache.set(u.email, entry); return entry;
+}
+// Ek hi jagah jo token (backend ka apna ya Firebase ka) ko user object me badalti hai
+async function resolveUser(token) {
+  if (!token) return null;
+  const own = verifyToken(token);
+  if (own) return { id: own.id, uid: own.uid, email: own.email, own: true, role: own.role === 'admin' ? 'admin' : 'user', superAdmin: own.role === 'admin' };
+  const fb = await verifyFirebase(token);
+  if (!fb) return null;
+  const r = await firebaseRole(fb);
+  fb.role = r.role; fb.instituteId = r.instituteId || null; fb.superAdmin = r.role === 'owner';
+  return fb;
+}
+const bearer = req => { const h = req.headers.authorization || ''; return h.startsWith('Bearer ') ? h.slice(7) : null; };
+const authMw = wrap(async (req, res, next) => { req.user = await resolveUser(bearer(req)); next(); });
+function requireAuth(req, res, next) { if (!req.user) return res.status(401).json({ error: 'Login required' }); next(); }
+function requireOwn(req, res, next) { if (!req.user || !req.user.own) return res.status(401).json({ error: 'Login required' }); next(); }
+
+const isAdmin = u => !!u && (u.role === 'admin' || u.role === 'owner');
+const isOwnerUser = u => !!u && (u.role === 'owner' || u.superAdmin === true);
+
+// Read allowed? returns {ok, ownerOnly}.  Level 'none' sabke liye band (admin ke liye bhi).
 function canRead(collection, user) {
   const lvl = rule(collection, 'read');
+  if (lvl === 'none') return { ok: false };
   if (isAdmin(user)) return { ok: true, ownerOnly: false };
   if (lvl === 'public') return { ok: true, ownerOnly: false };
   if (!user) return { ok: false };
@@ -146,10 +224,30 @@ function canRead(collection, user) {
 }
 function canWriteLevel(collection, user) {
   const lvl = rule(collection, 'write');
+  if (lvl === 'none') return false;
   if (isAdmin(user)) return true;
   if (lvl === 'public') return true;
   if (!user) return false;
   return lvl === 'auth' || lvl === 'owner';
+}
+// firestore.rules ke questionBank wala "createdBy" niyam (rules.json me "createdByGuard": true)
+function guardOk(collection, user, action, existing, finalData) {
+  if (!(RULES.collections && RULES.collections[collection] && RULES.collections[collection].createdByGuard)) return true;
+  if (isOwnerUser(user)) return true;
+  const has = o => o && Object.prototype.hasOwnProperty.call(o, 'createdBy');
+  if (action === 'create') return !has(finalData) || finalData.createdBy === user.email;
+  if (action === 'update') return !has(existing) || finalData.createdBy === existing.createdBy;
+  if (action === 'delete') return !has(existing) || existing.createdBy === user.email;
+  return false;
+}
+// Firestore ke FieldValue.serverTimestamp() ka sentinel ({__sv:'serverTimestamp'}) -> {__ts: ms}
+function resolveSentinels(v, now) {
+  if (Array.isArray(v)) return v.map(x => resolveSentinels(x, now));
+  if (v && typeof v === 'object') {
+    if (v.__sv === 'serverTimestamp') return { __ts: now };
+    const o = {}; for (const k of Object.keys(v)) o[k] = resolveSentinels(v[k], now); return o;
+  }
+  return v;
 }
 
 const fmt = r => ({ id: r.doc_id, data: r.data, createdAt: r.created_at, updatedAt: r.updated_at });
@@ -157,56 +255,56 @@ const fmt = r => ({ id: r.doc_id, data: r.data, createdAt: r.created_at, updated
 function broadcast(collection, row, action) {
   const payload = { collection, docId: row.doc_id, data: action === 'delete' ? null : row.data, action, timestamp: new Date() };
   io.to(`c:${collection}:all`).emit('update', payload);
-  if (row.user_id) io.to(`c:${collection}:u:${row.user_id}`).emit('update', payload);
+  if (row.owner_uid) io.to(`c:${collection}:u:${row.owner_uid}`).emit('update', payload);
 }
 
 // ---- document operations (shared by REST + batch) ----
+const uidOf = u => (u ? u.uid : null);
 async function opSet(client, user, collection, docId, data, merge = false) {
   checkCollection(collection); checkDocId(docId);
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new HttpError(400, 'data must be an object');
   if (!canWriteLevel(collection, user)) throw new HttpError(403, 'Write not allowed');
+  data = resolveSentinels(data, Date.now());
   const lvl = rule(collection, 'write');
-  const admin = isAdmin(user);
-  // Update sirf tab jab: admin, ya level 'auth'/'public', ya owner match
-  const sql = `
-    INSERT INTO documents (collection_name, doc_id, data, user_id)
-    VALUES ($1, $2, $3::jsonb, $4)
-    ON CONFLICT (collection_name, doc_id) DO UPDATE
-      SET data = ${merge ? 'documents.data || EXCLUDED.data' : 'EXCLUDED.data'}, updated_at = NOW()
-      WHERE $5::boolean OR $6::boolean OR documents.user_id = $4
-    RETURNING *`;
-  const r = await client.query(sql, [collection, docId, JSON.stringify(data), user ? user.id : null,
-    admin, lvl === 'auth' || lvl === 'public']);
-  if (!r.rows.length) throw new HttpError(403, 'Ye document kisi aur ka hai');
+  const privileged = isAdmin(user) || lvl === 'auth' || lvl === 'public';
+  const ex = (await client.query('SELECT data, owner_uid FROM documents WHERE collection_name=$1 AND doc_id=$2 FOR UPDATE', [collection, docId])).rows[0];
+  if (ex && !privileged && ex.owner_uid !== uidOf(user)) throw new HttpError(403, 'Ye document kisi aur ka hai');
+  const finalData = ex && merge ? { ...ex.data, ...data } : data;
+  if (!guardOk(collection, user, ex ? 'update' : 'create', ex && ex.data, finalData)) throw new HttpError(403, 'createdBy rule: ye question kisi aur admin ka hai');
+  const r = await client.query(
+    `INSERT INTO documents (collection_name, doc_id, data, user_id, owner_uid)
+     VALUES ($1, $2, $3::jsonb, $4, $5)
+     ON CONFLICT (collection_name, doc_id) DO UPDATE SET data = ${merge ? 'documents.data || EXCLUDED.data' : 'EXCLUDED.data'}, updated_at = NOW()
+     RETURNING *`,
+    [collection, docId, JSON.stringify(data), user && user.id || null, uidOf(user)]);
   return r.rows[0];
 }
 async function opUpdate(client, user, collection, docId, data) {
   checkCollection(collection); checkDocId(docId);
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new HttpError(400, 'data must be an object');
   if (!canWriteLevel(collection, user)) throw new HttpError(403, 'Write not allowed');
+  data = resolveSentinels(data, Date.now());
   const lvl = rule(collection, 'write');
+  const privileged = isAdmin(user) || lvl === 'auth' || lvl === 'public';
+  const ex = (await client.query('SELECT data, owner_uid FROM documents WHERE collection_name=$1 AND doc_id=$2 FOR UPDATE', [collection, docId])).rows[0];
+  if (!ex) throw new HttpError(404, 'Document not found');
+  if (!privileged && ex.owner_uid !== uidOf(user)) throw new HttpError(403, 'Ye document kisi aur ka hai');
+  if (!guardOk(collection, user, 'update', ex.data, { ...ex.data, ...data })) throw new HttpError(403, 'createdBy rule: ye question kisi aur admin ka hai');
   const r = await client.query(
-    `UPDATE documents SET data = data || $3::jsonb, updated_at = NOW()
-     WHERE collection_name = $1 AND doc_id = $2 AND ($4::boolean OR $5::boolean OR user_id = $6)
-     RETURNING *`,
-    [collection, docId, JSON.stringify(data), isAdmin(user), lvl === 'auth' || lvl === 'public', user ? user.id : null]);
-  if (!r.rows.length) {
-    const ex = await client.query('SELECT 1 FROM documents WHERE collection_name=$1 AND doc_id=$2', [collection, docId]);
-    throw new HttpError(ex.rows.length ? 403 : 404, ex.rows.length ? 'Ye document kisi aur ka hai' : 'Document not found');
-  }
+    `UPDATE documents SET data = data || $3::jsonb, updated_at = NOW() WHERE collection_name = $1 AND doc_id = $2 RETURNING *`,
+    [collection, docId, JSON.stringify(data)]);
   return r.rows[0];
 }
 async function opDelete(client, user, collection, docId) {
   checkCollection(collection); checkDocId(docId);
   if (!canWriteLevel(collection, user)) throw new HttpError(403, 'Write not allowed');
   const lvl = rule(collection, 'write');
-  const r = await client.query(
-    `DELETE FROM documents WHERE collection_name = $1 AND doc_id = $2 AND ($3::boolean OR $4::boolean OR user_id = $5) RETURNING *`,
-    [collection, docId, isAdmin(user), lvl === 'auth' || lvl === 'public', user ? user.id : null]);
-  if (!r.rows.length) {
-    const ex = await client.query('SELECT 1 FROM documents WHERE collection_name=$1 AND doc_id=$2', [collection, docId]);
-    throw new HttpError(ex.rows.length ? 403 : 404, ex.rows.length ? 'Ye document kisi aur ka hai' : 'Document not found');
-  }
+  const privileged = isAdmin(user) || lvl === 'auth' || lvl === 'public';
+  const ex = (await client.query('SELECT data, owner_uid FROM documents WHERE collection_name=$1 AND doc_id=$2 FOR UPDATE', [collection, docId])).rows[0];
+  if (!ex) throw new HttpError(404, 'Document not found');
+  if (!privileged && ex.owner_uid !== uidOf(user)) throw new HttpError(403, 'Ye document kisi aur ka hai');
+  if (!guardOk(collection, user, 'delete', ex.data, null)) throw new HttpError(403, 'createdBy rule: ye question kisi aur admin ka hai');
+  const r = await client.query('DELETE FROM documents WHERE collection_name = $1 AND doc_id = $2 RETURNING *', [collection, docId]);
   return r.rows[0];
 }
 
@@ -214,6 +312,7 @@ async function opDelete(client, user, collection, docId) {
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '2mb' }));
 app.use('/api/', rateLimit({ windowMs: 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false }));
+app.use('/api/', authMw); // req.user = backend ka apna user ya Firebase user (ya null)
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false,
   message: { error: 'Bahut zyada attempts, 15 minute baad try karo' } });
 
@@ -260,13 +359,13 @@ app.post('/api/auth/login', authLimiter, wrap(async (req, res) => {
   res.json({ success: true, user: { uid: u.uid, email: u.email, name: u.name, role: u.role }, token: signToken(u) });
 }));
 
-app.get('/api/auth/me', requireAuth, wrap(async (req, res) => {
+app.get('/api/auth/me', requireOwn, wrap(async (req, res) => {
   const r = await db.query('SELECT uid, email, name, role FROM users WHERE id = $1', [req.user.id]);
   if (!r.rows[0]) throw new HttpError(404, 'User not found');
   res.json({ success: true, user: r.rows[0] });
 }));
 
-app.post('/api/auth/change-password', requireAuth, authLimiter, wrap(async (req, res) => {
+app.post('/api/auth/change-password', requireOwn, authLimiter, wrap(async (req, res) => {
   const { oldPassword, newPassword } = req.body || {};
   if (!newPassword || String(newPassword).length < 6) throw new HttpError(400, 'Naya password kam se kam 6 character ka ho');
   const r = await db.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
@@ -276,19 +375,27 @@ app.post('/api/auth/change-password', requireAuth, authLimiter, wrap(async (req,
   res.json({ success: true });
 }));
 
+// Debug: "mera token backend ko kaisa dikh raha hai?" (Firebase token ke saath bhi chalta hai)
+app.get('/api/auth/whoami', wrap(async (req, res) => {
+  const u = req.user;
+  if (!u) return res.json({ success: true, signedIn: false, firebaseBridge: !!FIREBASE_PROJECT_ID });
+  res.json({ success: true, signedIn: true, via: u.own ? 'backend' : 'firebase', uid: u.uid, email: u.email || null,
+    anonymous: !!u.anonymous, role: u.role, instituteId: u.instituteId || null });
+}));
+
 // ---------------------------------------------------------------- documents
 // Query: ?where=field:op:value (repeatable; op = eq|ne|lt|lte|gt|gte)  &orderBy=field:desc  &limit=  &offset=  &since=ISO
 const OPS = { eq: '=', ne: '<>', lt: '<', lte: '<=', gt: '>', gte: '>=' };
 function parseValue(v) { try { return JSON.parse(v); } catch { return v; } }
 
-app.get('/api/collections/:collection/documents', optionalAuth, wrap(async (req, res) => {
+app.get('/api/collections/:collection/documents', wrap(async (req, res) => {
   const collection = checkCollection(req.params.collection);
   const perm = canRead(collection, req.user);
   if (!perm.ok) throw new HttpError(req.user ? 403 : 401, req.user ? 'Read not allowed' : 'Login required');
 
   const params = [collection];
   let sql = 'SELECT * FROM documents WHERE collection_name = $1';
-  if (perm.ownerOnly) { params.push(req.user.id); sql += ` AND user_id = $${params.length}`; }
+  if (perm.ownerOnly) { params.push(req.user.uid); sql += ` AND owner_uid = $${params.length}`; }
 
   const wheres = [].concat(req.query.where || []);
   for (const w of wheres) {
@@ -310,7 +417,8 @@ app.get('/api/collections/:collection/documents', optionalAuth, wrap(async (req,
     const [field, dir] = String(req.query.orderBy).split(':');
     if (!FIELD_RE.test(field || '')) throw new HttpError(400, 'Invalid orderBy field');
     params.push(field.split('.'));
-    sql += ` ORDER BY (data #> $${params.length}::text[]) ${dir === 'desc' ? 'DESC' : 'ASC'}, doc_id`;
+    // Firestore jaisa: orderBy field jis doc me nahi hai wo result me nahi aata
+    sql += ` AND (data #> $${params.length}::text[]) IS NOT NULL ORDER BY (data #> $${params.length}::text[]) ${dir === 'desc' ? 'DESC' : 'ASC'}, doc_id`;
   } else sql += ' ORDER BY updated_at DESC, doc_id';
 
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 1000);
@@ -322,7 +430,7 @@ app.get('/api/collections/:collection/documents', optionalAuth, wrap(async (req,
   res.json({ success: true, docs: r.rows.map(fmt), count: r.rows.length, serverTime: new Date().toISOString() });
 }));
 
-app.get('/api/collections/:collection/documents/:docId', optionalAuth, wrap(async (req, res) => {
+app.get('/api/collections/:collection/documents/:docId', wrap(async (req, res) => {
   const collection = checkCollection(req.params.collection);
   const docId = checkDocId(req.params.docId);
   const perm = canRead(collection, req.user);
@@ -330,11 +438,11 @@ app.get('/api/collections/:collection/documents/:docId', optionalAuth, wrap(asyn
   const r = await db.query('SELECT * FROM documents WHERE collection_name=$1 AND doc_id=$2', [collection, docId]);
   const row = r.rows[0];
   if (!row) throw new HttpError(404, 'Document not found');
-  if (perm.ownerOnly && row.user_id !== req.user.id) throw new HttpError(403, 'Read not allowed');
+  if (perm.ownerOnly && row.owner_uid !== req.user.uid) throw new HttpError(403, 'Read not allowed');
   res.json({ success: true, doc: fmt(row) });
 }));
 
-app.post('/api/collections/:collection/documents', optionalAuth, wrap(async (req, res) => {
+app.post('/api/collections/:collection/documents', wrap(async (req, res) => {
   const { collection } = req.params;
   const { data, docId, merge } = req.body || {};
   const row = await opSet(db, req.user, collection, docId || crypto.randomUUID(), data, !!merge);
@@ -342,14 +450,14 @@ app.post('/api/collections/:collection/documents', optionalAuth, wrap(async (req
   res.json({ success: true, doc: fmt(row) });
 }));
 
-app.patch('/api/collections/:collection/documents/:docId', optionalAuth, wrap(async (req, res) => {
+app.patch('/api/collections/:collection/documents/:docId', wrap(async (req, res) => {
   const { collection, docId } = req.params;
   const row = await opUpdate(db, req.user, collection, docId, (req.body || {}).data);
   broadcast(collection, row, 'update');
   res.json({ success: true, doc: fmt(row) });
 }));
 
-app.delete('/api/collections/:collection/documents/:docId', optionalAuth, wrap(async (req, res) => {
+app.delete('/api/collections/:collection/documents/:docId', wrap(async (req, res) => {
   const { collection, docId } = req.params;
   const row = await opDelete(db, req.user, collection, docId);
   broadcast(collection, row, 'delete');
@@ -357,7 +465,7 @@ app.delete('/api/collections/:collection/documents/:docId', optionalAuth, wrap(a
 }));
 
 // Batch: ek hi transaction me kai writes (max 400)
-app.post('/api/batch', optionalAuth, wrap(async (req, res) => {
+app.post('/api/batch', wrap(async (req, res) => {
   const ops = (req.body || {}).ops;
   if (!Array.isArray(ops) || !ops.length || ops.length > 400) throw new HttpError(400, 'ops 1..400 hone chahiye');
   const client = await db.connect();
@@ -389,18 +497,18 @@ const upload = multer({
   fileFilter: (req, file, cb) => ALLOWED_MIME.test(file.mimetype) ? cb(null, true) : cb(new HttpError(400, 'Sirf image (png/jpg/gif/webp) ya PDF allowed hai'))
 });
 
-app.post('/api/storage/upload', requireAuth, upload.single('file'), wrap(async (req, res) => {
+app.post('/api/storage/upload', requireOwn, upload.single('file'), wrap(async (req, res) => {
   if (!req.file) throw new HttpError(400, 'File nahi mili');
   const fileId = crypto.randomUUID();
   await db.query('INSERT INTO file_storage (file_id, filename, stored_name, size, mimetype, user_id) VALUES ($1,$2,$3,$4,$5,$6)',
     [fileId, req.file.originalname, req.file.filename, req.file.size, req.file.mimetype, req.user.id]);
   res.json({ success: true, file: { id: fileId, name: req.file.originalname, url: `${BASE_URL}/uploads/${req.file.filename}`, size: req.file.size } });
 }));
-app.get('/api/storage/files', requireAuth, wrap(async (req, res) => {
+app.get('/api/storage/files', requireOwn, wrap(async (req, res) => {
   const r = await db.query('SELECT * FROM file_storage WHERE user_id=$1 ORDER BY created_at DESC LIMIT 500', [req.user.id]);
   res.json({ success: true, files: r.rows.map(f => ({ id: f.file_id, name: f.filename, size: f.size, url: `${BASE_URL}/uploads/${f.stored_name}` })) });
 }));
-app.delete('/api/storage/files/:id', requireAuth, wrap(async (req, res) => {
+app.delete('/api/storage/files/:id', requireOwn, wrap(async (req, res) => {
   const r = await db.query('DELETE FROM file_storage WHERE file_id=$1 AND ($2::boolean OR user_id=$3) RETURNING stored_name',
     [req.params.id, isAdmin(req.user), req.user.id]);
   if (!r.rows[0]) throw new HttpError(404, 'File not found');
@@ -410,7 +518,7 @@ app.delete('/api/storage/files/:id', requireAuth, wrap(async (req, res) => {
 app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '7d', index: false, dotfiles: 'deny' }));
 
 // ---------------------------------------------------------------- stats (admin)
-app.get('/api/stats', requireAuth, wrap(async (req, res) => {
+app.get('/api/stats', requireOwn, wrap(async (req, res) => {
   if (!isAdmin(req.user)) throw new HttpError(403, 'Admin only');
   const [u, d, f] = await Promise.all([
     db.query('SELECT COUNT(*)::int c FROM users'), db.query('SELECT COUNT(*)::int c FROM documents'), db.query('SELECT COUNT(*)::int c FROM file_storage')]);
@@ -420,13 +528,14 @@ app.get('/api/stats', requireAuth, wrap(async (req, res) => {
 
 // ---------------------------------------------------------------- realtime
 io.on('connection', socket => {
-  socket.on('subscribe', ({ collection, token } = {}) => {
+  socket.on('subscribe', async ({ collection, token } = {}) => {
     try {
       checkCollection(collection);
-      const user = verifyToken(token);
+      const user = await resolveUser(token);
       const perm = canRead(collection, user);
       if (!perm.ok) return socket.emit('error', 'Read not allowed');
-      socket.join(perm.ownerOnly ? `c:${collection}:u:${user.id}` : `c:${collection}:all`);
+      socket.join(perm.ownerOnly ? `c:${collection}:u:${user.uid}` : `c:${collection}:all`);
+      socket.emit('subscribed', { collection });
     } catch { socket.emit('error', 'Invalid subscribe request'); }
   });
   socket.on('unsubscribe', collection => {
@@ -451,4 +560,4 @@ async function start() {
   server.listen(PORT, () => console.log(`SnapTestPro backend running on port ${PORT}`));
 }
 if (require.main === module) start().catch(e => { console.error('Start failed:', e.message); process.exit(1); });
-module.exports = { app, server, io, db, initDb, start };
+module.exports = { app, server, io, db, initDb, start, __setFetch: f => { fetchFn = f; fbCerts = {}; fbCertsExp = 0; adminCache.clear(); } };

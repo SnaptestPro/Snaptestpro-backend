@@ -8,17 +8,17 @@
  *   DATABASE_URL=postgresql://... node scripts/import-firestore.js questions tests records
  *   # collection naam nahi doge to saari top-level collections import hongi
  *
- * Dhyan: imported documents ka owner (user_id) khali rehta hai. Isliye jo collection
- * rules.json me "owner" read wali hain, unhe sirf admin dekh payega. Un collections ko
- * "auth"/"public" read karo, ya app se naye data ke saath owner ban jayega.
- * Sub-collections import nahi hoti (sirf top-level).
+ * Dhyan: imported documents ka owner khali rehta hai. rules.json me "owner" read wali collections ko sirf
+ * admin dekh payega (hybrid mode ki collections questionBank/deletedQuestions... "auth"/"admin" hain, unpar asar nahi).
+ * Sub-collections import nahi hoti (sirf top-level). Timestamp {__ts: ms} ban kar jata hai.
+ * Dobara chalane par wahi doc overwrite hota hai (safe), isliye migration ke din last baar chalao.
  */
 require('dotenv').config();
 const { Pool } = require('pg');
 
 function convert(v) {
   if (v === null || v === undefined) return null;
-  if (typeof v.toDate === 'function') return v.toDate().toISOString();            // Timestamp
+  if (typeof v.toDate === 'function' && typeof v.toMillis === 'function') return { __ts: v.toMillis() }; // Timestamp (own-backend.js isi format ko wapas Timestamp banata hai)
   if (typeof v.latitude === 'number' && typeof v.longitude === 'number') return { lat: v.latitude, lng: v.longitude }; // GeoPoint
   if (v.path && v.firestore) return v.path;                                        // DocumentReference
   if (Buffer.isBuffer(v)) return v.toString('base64');

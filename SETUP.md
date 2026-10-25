@@ -1,4 +1,6 @@
 # SnapTestPro Backend v2 — Setup Guide (Hinglish)
+> **Naya:** Firebase ke saath hybrid mode ke liye `HYBRID.md` padho.
+
 
 Ye Firebase ki jagah ek **free backend** hai: Node.js + PostgreSQL. Isme Login, Database (Firestore jaisa),
 Live updates (onSnapshot jaisa) aur File upload hai. Firebase ke daily read/write limit ka tension nahi.

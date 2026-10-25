@@ -1,12 +1,12 @@
 {
   "name": "snaptestpro-backend",
-  "version": "2.0.0",
-  "description": "SnapTestPro free self-hosted backend (Firestore-like API on PostgreSQL + Socket.io)",
+  "version": "2.1.0",
+  "description": "SnapTestPro free self-hosted backend (Firestore-like API on PostgreSQL + Socket.io) with Firebase hybrid mode",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/smoke.js"
+    "test": "node test/smoke.js && node test/sdk-test.js && node test/hybrid-test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
