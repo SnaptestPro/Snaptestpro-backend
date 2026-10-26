@@ -314,6 +314,15 @@ app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '2mb' }));
 app.use('/api/', rateLimit({ windowMs: 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false }));
 app.use('/api/', authMw); // req.user = backend ka apna user ya Firebase user (ya null)
+// Purane app-version band: MIN_BUILD (Render env) set ho to admin/owner ki wo requests jinme X-App-Build >= MIN_BUILD nahi, 426 se lautti hain.
+// Students/anonymous par kabhi nahi lagta. MIN_BUILD khali/0 = band. (Header na bhejne wale bahut purane app bhi isi me aate hain.)
+const MIN_BUILD = parseInt(process.env.MIN_BUILD || '0', 10) || 0;
+app.use('/api/', (req, res, next) => {
+  if (!MIN_BUILD || !isAdmin(req.user)) return next();
+  const build = parseInt(req.get('x-app-build') || '0', 10) || 0;
+  if (build >= MIN_BUILD) return next();
+  res.status(426).json({ error: 'App update zaroori hai (build ' + MIN_BUILD + ' ya naya chahiye)', code: 'update-required', minBuild: MIN_BUILD });
+});
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false,
   message: { error: 'Bahut zyada attempts, 15 minute baad try karo' } });
 
