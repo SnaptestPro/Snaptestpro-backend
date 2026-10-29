@@ -565,8 +565,8 @@ io.on('connection', socket => {
 });
 
 // ---------------------------------------------------------------- errors
-app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 require('./clip')({ app, db, wrap, HttpError, isAdmin, uidOf, broadcast }); // SnapTest Clipper (photo -> AI -> PDF Drafts)
+app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => { // eslint-disable-line
   if (err instanceof multer.MulterError) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? `File ${MAX_UPLOAD / 1048576}MB se badi hai` : err.message });
   if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Request bahut badi hai' });

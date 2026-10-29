@@ -25,6 +25,12 @@ const Q2 = { qType: 'mcq', question: 'x² + 1 = 0 ke roots?', options: ['1', '-1
   });
   await ok('sniffMime', () => { assert.strictEqual(I.sniffMime(JPG), 'image/jpeg'); assert.strictEqual(I.sniffMime(Buffer.alloc(50)), null); });
 
+  await ok('server.js: Clip routes catch-all 404 se PEHLE mount hain', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
+    const a = src.indexOf("require('./clip')"), b = src.indexOf("res.status(404).json({ error: 'Not found' })");
+    assert.ok(a > 0 && b > 0 && a < b, 'clip mount 404 handler ke baad hai - routes kabhi nahi chalenge');
+  });
+
   console.log('routes');
   const S = { keys: [], usage: {}, images: [], docs: [], bcast: [] };
   const db = { async query(sql, p = []) {
