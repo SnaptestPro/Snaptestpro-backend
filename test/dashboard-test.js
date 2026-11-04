@@ -2,7 +2,7 @@
 let JSDOM; try { ({ JSDOM } = require('jsdom')); } catch { console.log('SKIP: jsdom install nahi hai (npm i --no-save jsdom)'); process.exit(0); }
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-test-secret-test-secret';
 process.env.ADMIN_EMAILS = 'owner@test.com';
-process.env.NODE_ENV = 'test'; process.env.RULES_FILE = require('path').join(__dirname, 'rules.test.json');
+process.env.NODE_ENV = 'test'; process.env.MIN_BUILD = '247'; process.env.RULES_FILE = require('path').join(__dirname, 'rules.test.json');
 const { server, db, initDb, io } = require('../server');
 let base, passed = 0, failed = 0;
 const ok = (c, m) => { if (c) { passed++; console.log('  ✓', m); } else { failed++; console.log('  ✗ FAIL:', m); } };
@@ -14,7 +14,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   base = 'http://localhost:' + server.address().port;
   await fetch(base + '/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'owner@test.com', password: 'secret1' }) });
   const tk = (await (await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'owner@test.com', password: 'secret1' }) })).json()).token;
-  await fetch(base + '/api/admin/documents/questions/q1', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tk }, body: JSON.stringify({ data: { text: '<img src=x onerror=alert(1)>' } }) });
+  await fetch(base + '/api/admin/documents/questions/q1', { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tk, 'X-App-Build': '300' }, body: JSON.stringify({ data: { text: '<img src=x onerror=alert(1)>' } }) });
 
   const errors = [];
   const dom = await JSDOM.fromURL(base + '/dashboard', {
