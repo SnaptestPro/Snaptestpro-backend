@@ -1,5 +1,5 @@
 /**
- * SnapTestPro Backend v2.1 — free, self-hosted Firebase (Firestore + Auth + Storage) alternative
+ * SnapTestPro Backend v2.2 — free, self-hosted Firebase (Firestore + Auth + Storage) alternative
  * Node.js + Express + PostgreSQL (JSONB) + Socket.io
  *
  * v2.1 HYBRID MODE: Firebase login (ID token) bhi accept hota hai, taaki app ka Firebase Auth jaisa ka taisa
@@ -54,7 +54,7 @@ const corsOrigin = (origin, cb) => {
   // Same-origin / curl / mobile webview (no Origin header) allowed
   if (!origin) return cb(null, true);
   if (!ORIGINS.length && !IS_PROD) return cb(null, true);
-  cb(null, ORIGINS.includes(origin));
+  cb(null, ORIGINS.includes(origin) || ext.originAllowed(origin)); // ext: projects ke registered origins (v2.2)
 };
 
 // ---------------------------------------------------------------- app + db
@@ -105,6 +105,7 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await ext.initSchema(); // v2.2: projects, usage, audit, DB-saved rules
 }
 
 // ---------------------------------------------------------------- helpers
@@ -127,7 +128,8 @@ function checkDocId(id) {
   return id;
 }
 function rule(collection, kind) {
-  const r = (RULES.collections && RULES.collections[collection]) || RULES.default || {};
+  const { R, key } = ext.rulesFor(collection, RULES); // project collection ho to us project ke rules (v2.2)
+  const r = (R.collections && R.collections[key]) || R.default || {};
   return r[kind] || 'owner';
 }
 
@@ -197,6 +199,7 @@ async function firebaseRole(u) {
 async function resolveUser(token) {
   if (!token) return null;
   const own = verifyToken(token);
+  if (own && own.pid) return ext.projectUser(own); // project ke end-user ka token (v2.2)
   if (own) return { id: own.id, uid: own.uid, email: own.email, own: true, role: own.role === 'admin' ? 'admin' : 'user', superAdmin: own.role === 'admin' };
   const fb = await verifyFirebase(token);
   if (!fb) return null;
@@ -233,7 +236,8 @@ function canWriteLevel(collection, user) {
 }
 // firestore.rules ke questionBank wala "createdBy" niyam (rules.json me "createdByGuard": true)
 function guardOk(collection, user, action, existing, finalData) {
-  if (!(RULES.collections && RULES.collections[collection] && RULES.collections[collection].createdByGuard)) return true;
+  const { R, key } = ext.rulesFor(collection, RULES);
+  if (!(R.collections && R.collections[key] && R.collections[key].createdByGuard)) return true;
   if (isOwnerUser(user)) return true;
   const has = o => o && Object.prototype.hasOwnProperty.call(o, 'createdBy');
   if (action === 'create') return !has(finalData) || finalData.createdBy === user.email;
@@ -254,7 +258,7 @@ function resolveSentinels(v, now) {
 const fmt = r => ({ id: r.doc_id, data: r.data, createdAt: r.created_at, updatedAt: r.updated_at });
 
 function broadcast(collection, row, action) {
-  const payload = { collection, docId: row.doc_id, data: action === 'delete' ? null : row.data, action, timestamp: new Date() };
+  const payload = { collection: ext.displayName(collection), docId: row.doc_id, data: action === 'delete' ? null : row.data, action, timestamp: new Date() };
   io.to(`c:${collection}:all`).emit('update', payload);
   if (row.owner_uid) io.to(`c:${collection}:u:${row.owner_uid}`).emit('update', payload);
 }
@@ -309,16 +313,25 @@ async function opDelete(client, user, collection, docId) {
   return r.rows[0];
 }
 
+// ---------------------------------------------------------------- v2.2 extras (projects, admin API, dashboard)
+const ext = require('./extras')({
+  db, io, wrap, HttpError, isOwnerUser, checkDocId, broadcast, verifyToken, ADMIN_EMAILS, BASE_URL,
+  signJwt: payload => jwt.sign(payload, SECRET, { expiresIn: `${TOKEN_DAYS}d`, algorithm: 'HS256' }),
+  getRules: () => RULES, setRules: r => { RULES = r; },
+  reloadRulesFile: () => { try { RULES = JSON.parse(fs.readFileSync(RULES_FILE, 'utf8')); } catch { RULES = { default: { read: 'owner', write: 'owner' }, collections: {} }; } }
+});
+
 // ---------------------------------------------------------------- middleware (ROUTES SE PEHLE!)
 app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '2mb' }));
 app.use('/api/', rateLimit({ windowMs: 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false }));
 app.use('/api/', authMw); // req.user = backend ka apna user ya Firebase user (ya null)
+app.use('/api/', ext.projectMw); // X-Api-Key wale project requests ko alag namespace me bhejta hai (v2.2)
 // Purane app-version band: MIN_BUILD (Render env) set ho to admin/owner ki wo requests jinme X-App-Build >= MIN_BUILD nahi, 426 se lautti hain.
 // Students/anonymous par kabhi nahi lagta. MIN_BUILD khali/0 = band. (Header na bhejne wale bahut purane app bhi isi me aate hain.)
 const MIN_BUILD = parseInt(process.env.MIN_BUILD || '0', 10) || 0;
 app.use('/api/', (req, res, next) => {
-  if (!MIN_BUILD || !isAdmin(req.user)) return next();
+  if (!MIN_BUILD || req.project || !isAdmin(req.user)) return next();
   const build = parseInt(req.get('x-app-build') || '0', 10) || 0;
   if (build >= MIN_BUILD) return next();
   res.status(426).json({ error: 'App update zaroori hai (build ' + MIN_BUILD + ' ya naya chahiye)', code: 'update-required', minBuild: MIN_BUILD });
@@ -549,23 +562,34 @@ app.get('/api/stats', requireOwn, wrap(async (req, res) => {
 
 // ---------------------------------------------------------------- realtime
 io.on('connection', socket => {
-  socket.on('subscribe', async ({ collection, token } = {}) => {
+  socket.on('subscribe', async ({ collection, token, apiKey } = {}) => {
     try {
-      checkCollection(collection);
-      const user = await resolveUser(token);
-      const perm = canRead(collection, user);
+      let coll = collection, user;
+      if (apiKey) { // project ka socket (v2.2)
+        const sc = await ext.scopeSocket({ apiKey, token, collection, origin: socket.handshake.headers.origin });
+        if (!sc) return socket.emit('error', 'Invalid project key');
+        coll = sc.collection; user = sc.user; socket.data.prefix = sc.prefix;
+      } else {
+        checkCollection(collection);
+        user = await resolveUser(token);
+        if (ext.isReserved(collection) && !isOwnerUser(user)) return socket.emit('error', 'Read not allowed');
+      }
+      checkCollection(coll);
+      const perm = canRead(coll, user);
       if (!perm.ok) return socket.emit('error', 'Read not allowed');
-      socket.join(perm.ownerOnly ? `c:${collection}:u:${user.uid}` : `c:${collection}:all`);
+      socket.join(perm.ownerOnly ? `c:${coll}:u:${user.uid}` : `c:${coll}:all`);
       socket.emit('subscribed', { collection });
     } catch { socket.emit('error', 'Invalid subscribe request'); }
   });
   socket.on('unsubscribe', collection => {
-    for (const room of socket.rooms) if (typeof collection === 'string' && room.startsWith(`c:${collection}:`)) socket.leave(room);
+    const full = (socket.data.prefix || '') + collection;
+    for (const room of socket.rooms) if (typeof collection === 'string' && room.startsWith(`c:${full}:`)) socket.leave(room);
   });
 });
 
 // ---------------------------------------------------------------- errors
 require('./clip')({ app, db, wrap, HttpError, isAdmin, uidOf, broadcast }); // SnapTest Clipper (photo -> AI -> PDF Drafts)
+ext.mount(app); // v2.2: /api/admin, /api/p, /dashboard, /sdk
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => { // eslint-disable-line
   if (err instanceof multer.MulterError) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? `File ${MAX_UPLOAD / 1048576}MB se badi hai` : err.message });
@@ -582,4 +606,4 @@ async function start() {
   server.listen(PORT, () => console.log(`SnapTestPro backend running on port ${PORT}`));
 }
 if (require.main === module) start().catch(e => { console.error('Start failed:', e.message); process.exit(1); });
-module.exports = { app, server, io, db, initDb, start, __setFetch: f => { fetchFn = f; fbCerts = {}; fbCertsExp = 0; adminCache.clear(); } };
+module.exports = { app, server, io, db, ext, initDb, start, __setFetch: f => { fetchFn = f; fbCerts = {}; fbCertsExp = 0; adminCache.clear(); } };

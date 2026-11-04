@@ -9,6 +9,10 @@
  *   await stp.collection('results').doc('r1').set({ score: 80 });
  *   const unsub = stp.collection('tests').onSnapshot(snap => render(snap.docs));
  *
+ * DUSRE LOG (project): backend ka owner tumhe ek apiKey deta hai. Tumhara data aur users alag rehte hain.
+ *   const stp = new SnapTestPro('https://backend.onrender.com', { apiKey: 'stp_pk_...' });
+ *   (server-side/secret kaam ke liye: { apiKey, adminKey } — adminKey kabhi browser me mat daalna)
+ *
  * Reads bachane ke liye get() result localStorage me cache hota hai (default 5 minute).
  *   .get({ cache: 'reload' })  -> hamesha server se
  *   .get({ cache: 'only' })    -> sirf cache se (offline)
@@ -29,8 +33,11 @@
     constructor(baseURL, opts = {}) {
       this.baseURL = String(baseURL).replace(/\/$/, '');
       this.cacheTTL = opts.cacheTTL != null ? opts.cacheTTL : 5 * 60 * 1000; // ms
-      this.token = this._ls('get', 'stp_token');
-      const u = this._ls('get', 'stp_user');
+      this.apiKey = opts.apiKey || null;
+      this.adminKey = opts.adminKey || null;
+      this._sfx = this.apiKey ? ':' + this.apiKey.slice(-8) : ''; // alag project ka token/cache aapas me na mile
+      this.token = this._ls('get', 'stp_token' + this._sfx);
+      const u = this._ls('get', 'stp_user' + this._sfx);
       this.currentUser = u ? JSON.parse(u) : null;
       this._authCbs = [];
       this._listeners = {}; // collection -> [{cb, query, docs:Map}]
@@ -50,6 +57,8 @@
     async _req(method, path, body, isForm) {
       const headers = {};
       if (this.token) headers.Authorization = 'Bearer ' + this.token;
+      if (this.apiKey) headers['X-Api-Key'] = this.apiKey;
+      if (this.adminKey) headers['X-Admin-Key'] = this.adminKey;
       if (body && !isForm) headers['Content-Type'] = 'application/json';
       const res = await fetch(this.baseURL + path, { method, headers, body: body ? (isForm ? body : JSON.stringify(body)) : undefined });
       let json = {};
@@ -62,32 +71,33 @@
     }
     _setUser(user, token) {
       this.currentUser = user; this.token = token;
-      if (user) { this._ls('set', 'stp_token', token); this._ls('set', 'stp_user', JSON.stringify(user)); }
-      else { this._ls('del', 'stp_token'); this._ls('del', 'stp_user'); this.clearCache(); }
+      if (user) { this._ls('set', 'stp_token' + this._sfx, token); this._ls('set', 'stp_user' + this._sfx, JSON.stringify(user)); }
+      else { this._ls('del', 'stp_token' + this._sfx); this._ls('del', 'stp_user' + this._sfx); this.clearCache(); }
       this._authCbs.forEach(cb => { try { cb(user); } catch (e) { console.error(e); } });
       if (this._socket) Object.keys(this._listeners).forEach(c => this._subscribe(c));
     }
-    _cacheKey(path) { return 'stp_c:' + (this.currentUser ? this.currentUser.uid : 'anon') + ':' + path; }
+    _cacheKey(path) { return 'stp_c:' + this._sfx + (this.currentUser ? this.currentUser.uid : 'anon') + ':' + path; }
     _invalidate(collection) {
-      (this._ls('keys') || []).forEach(k => { if (k.startsWith('stp_c:') && k.indexOf('/collections/' + collection + '/') !== -1) this._ls('del', k); });
+      (this._ls('keys') || []).forEach(k => { if (k.startsWith('stp_c:' + this._sfx) && k.indexOf('/collections/' + collection + '/') !== -1) this._ls('del', k); });
     }
-    clearCache() { (this._ls('keys') || []).forEach(k => { if (k.startsWith('stp_c:')) this._ls('del', k); }); }
+    clearCache() { (this._ls('keys') || []).forEach(k => { if (k.startsWith('stp_c:' + this._sfx)) this._ls('del', k); }); }
 
     // ------------------------------------------------ auth
     auth() {
       const self = this;
+      const A = () => (self.apiKey ? '/api/p/auth' : '/api/auth'); // project ho to uske apne users
       return {
         get currentUser() { return self.currentUser; },
         async createUserWithEmailAndPassword(email, password, name) {
-          const r = await self._req('POST', '/api/auth/signup', { email, password, name });
+          const r = await self._req('POST', A() + '/signup', { email, password, name });
           self._setUser(r.user, r.token); return { user: r.user };
         },
         async signInWithEmailAndPassword(email, password) {
-          const r = await self._req('POST', '/api/auth/login', { email, password });
+          const r = await self._req('POST', A() + '/login', { email, password });
           self._setUser(r.user, r.token); return { user: r.user };
         },
         async signOut() { self._setUser(null, null); },
-        async changePassword(oldPassword, newPassword) { return self._req('POST', '/api/auth/change-password', { oldPassword, newPassword }); },
+        async changePassword(oldPassword, newPassword) { return self._req('POST', A() + '/change-password', { oldPassword, newPassword }); },
         onAuthStateChanged(cb) { self._authCbs.push(cb); setTimeout(() => cb(self.currentUser), 0); return () => { self._authCbs = self._authCbs.filter(f => f !== cb); }; }
       };
     }
@@ -146,7 +156,7 @@
       s.onerror = () => { this._socketLoading = false; console.warn('Realtime load nahi hua, sirf normal reads chalenge'); };
       document.head.appendChild(s);
     }
-    _subscribe(collection) { if (this._socket && this._socket.connected) this._socket.emit('subscribe', { collection, token: this.token }); }
+    _subscribe(collection) { if (this._socket && this._socket.connected) this._socket.emit('subscribe', { collection, token: this.token, apiKey: this.apiKey }); }
     _onUpdate(ev) {
       (this._listeners[ev.collection] || []).forEach(l => {
         if (ev.action === 'delete') l.docs.delete(ev.docId);
